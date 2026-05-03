@@ -52,7 +52,16 @@ PALANTIR_LINK_URL = os.getenv(
 PALANTIR_MIN_CONF = float(os.getenv("PALANTIR_MIN_CONF", "0.80"))
 PALANTIR_WS_MIN_INTERVAL_S = float(os.getenv("PALANTIR_WS_MIN_INTERVAL_S", "10"))
 PALANTIR_ENABLED = bool(PALANTIR_TOKEN) and os.getenv("PALANTIR_ENABLE_REPORTS", "1") != "0"
+# Optional: name of an attachment-typed parameter on the action.
+# Set this to the action's attachment param API name to enable image uploads.
+PALANTIR_ATTACHMENT_PARAM = os.getenv("PALANTIR_ATTACHMENT_PARAM", "image")
+PALANTIR_PUBLIC_BASE = os.getenv(
+    "PALANTIR_PUBLIC_BASE",
+    "https://shahed-detector.panda-anaconda.ts.net/api/backend",
+)
 _LAST_WS_REPORT_AT = 0.0
+SNAPSHOT_DIR = OUT_DIR / "snapshots"
+SNAPSHOT_DIR.mkdir(exist_ok=True)
 
 # pick best device: cuda > mps > cpu
 if torch.cuda.is_available():
@@ -211,7 +220,69 @@ def iso_timestamp(value=None):
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def build_palantir_report(detections, source_name, event_ts=None):
+def annotate_pil(pil_img: Image.Image, detections) -> Image.Image:
+    """Draw HUD-style boxes on a PIL image for snapshot/attachment."""
+    from PIL import ImageDraw, ImageFont
+    img = pil_img.copy()
+    drw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", max(14, img.width // 60))
+    except Exception:
+        font = ImageFont.load_default()
+    for d in detections:
+        x1, y1, x2, y2 = [int(round(v)) for v in d["xyxy"]]
+        c = d["conf"]
+        color = (183, 148, 246) if c > 0.6 else (255, 209, 102) if c > 0.35 else (255, 92, 138)
+        for off in range(3):
+            drw.rectangle([x1 - off, y1 - off, x2 + off, y2 + off], outline=color)
+        label = f"{d['class'].upper()} {c*100:.0f}%"
+        tw, th = drw.textbbox((0, 0), label, font=font)[2:]
+        drw.rectangle([x1, max(0, y1 - th - 8), x1 + tw + 12, y1], fill=color)
+        drw.text((x1 + 6, max(0, y1 - th - 6)), label, fill=(8, 9, 14), font=font)
+    return img
+
+
+def upload_palantir_attachment(image_bytes: bytes, filename: str) -> str | None:
+    """Upload a binary file as a Foundry attachment. Returns the RID or None."""
+    if not PALANTIR_TOKEN:
+        return None
+    from urllib.parse import quote
+    url = f"{PALANTIR_API_URL}/api/v2/ontologies/attachments/upload?filename={quote(filename)}"
+    req = urllib.request.Request(
+        url, data=image_bytes,
+        headers={
+            "Authorization": f"Bearer {PALANTIR_TOKEN}",
+            "Content-Type": "application/octet-stream",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read().decode("utf-8") or "{}")
+        rid = body.get("rid")
+        if rid:
+            print(f"palantir attachment uploaded: {rid} ({filename}, {body.get('sizeBytes')} bytes)", flush=True)
+        return rid
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        print(f"palantir attachment upload failed: {exc.code} {detail}", flush=True)
+        return None
+    except Exception as exc:
+        print(f"palantir attachment upload failed: {exc}", flush=True)
+        return None
+
+
+def save_snapshot(pil_img: Image.Image) -> tuple[str, bytes]:
+    """Save annotated image to outputs/snapshots/<id>.jpg, return (id, bytes)."""
+    sid = uuid.uuid4().hex
+    buf = io.BytesIO()
+    pil_img.save(buf, format="JPEG", quality=85)
+    raw = buf.getvalue()
+    (SNAPSHOT_DIR / f"{sid}.jpg").write_bytes(raw)
+    return sid, raw
+
+
+def build_palantir_report(detections, source_name, event_ts=None, snapshot_id=None, attachment_rid=None):
     if not PALANTIR_ENABLED:
         return None
     top = best_detection(detections)
@@ -220,20 +291,26 @@ def build_palantir_report(detections, source_name, event_ts=None):
     top_conf_pct = round(top["conf"] * 100)
     event_time = iso_timestamp(event_ts)
     bbox = ", ".join(str(round(v, 1)) for v in top["xyxy"])
-    return {
-        "parameters": {
-            "title": f"AIR THREAT ALERT // {top['class'].upper()} // {top_conf_pct}%",
-            "text": (
-                f"SOURCE: {source_name}\n"
-                f"TIME: {event_time}\n"
-                f"DETECTIONS: {len(detections)}\n"
-                f"TOP CONFIDENCE: {top_conf_pct}%\n"
-                f"TOP BBOX: [{bbox}]"
-            ),
-            "link_text": "OPEN LIVE DETECTOR",
-            "link_url": PALANTIR_LINK_URL,
-        }
+    parameters = {
+        "title": f"AIR THREAT ALERT // {top['class'].upper()} // {top_conf_pct}%",
+        "text": (
+            f"SOURCE: {source_name}\n"
+            f"TIME: {event_time}\n"
+            f"DETECTIONS: {len(detections)}\n"
+            f"TOP CONFIDENCE: {top_conf_pct}%\n"
+            f"TOP BBOX: [{bbox}]"
+        ),
+        "link_text": "OPEN LIVE DETECTOR",
+        "link_url": PALANTIR_LINK_URL,
     }
+    # Public image URL fallback (works whether the action accepts an
+    # attachment or just a string URL field).
+    if snapshot_id:
+        parameters["image_url"] = f"{PALANTIR_PUBLIC_BASE}/snapshot/{snapshot_id}.jpg"
+    # Attachment-typed parameter (action must declare this param name)
+    if attachment_rid and PALANTIR_ATTACHMENT_PARAM:
+        parameters[PALANTIR_ATTACHMENT_PARAM] = attachment_rid
+    return {"parameters": parameters}
 
 
 def post_palantir_report(payload):
@@ -251,12 +328,33 @@ def post_palantir_report(payload):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             body = json.loads(resp.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="ignore")
         print(f"palantir report failed: {exc.code} {detail}", flush=True)
-        return
+        # if the attachment param was rejected, retry without it
+        if exc.code in (400, 422) and "image" in detail and "parameters" in payload:
+            params = dict(payload["parameters"])
+            for k in (PALANTIR_ATTACHMENT_PARAM, "image_url"):
+                params.pop(k, None)
+            print("retrying palantir report without image params", flush=True)
+            try:
+                req2 = urllib.request.Request(
+                    url, data=json.dumps({"parameters": params}).encode("utf-8"),
+                    headers={
+                        "Authorization": f"Bearer {PALANTIR_TOKEN}",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req2, timeout=10) as resp2:
+                    body = json.loads(resp2.read().decode("utf-8") or "{}")
+            except Exception as exc2:
+                print(f"palantir retry failed: {exc2}", flush=True)
+                return
+        else:
+            return
     except Exception as exc:
         print(f"palantir report failed: {exc}", flush=True)
         return
@@ -264,11 +362,30 @@ def post_palantir_report(payload):
         print(f"palantir report rejected: {body}", flush=True)
 
 
-async def maybe_send_palantir_report(detections, source_name, event_ts=None):
-    payload = build_palantir_report(detections, source_name, event_ts=event_ts)
+def _send_palantir_with_image(detections, source_name, pil_img, event_ts=None):
+    """Synchronous: snapshot → upload attachment → post action."""
+    annotated = annotate_pil(pil_img, detections) if pil_img is not None else None
+    sid, raw = (None, None)
+    rid = None
+    if annotated is not None:
+        sid, raw = save_snapshot(annotated)
+        rid = upload_palantir_attachment(raw, f"detection-{sid}.jpg")
+    payload = build_palantir_report(
+        detections, source_name, event_ts=event_ts,
+        snapshot_id=sid, attachment_rid=rid,
+    )
     if payload is None:
         return
-    await asyncio.to_thread(post_palantir_report, payload)
+    post_palantir_report(payload)
+
+
+async def maybe_send_palantir_report(detections, source_name, event_ts=None, pil_img=None):
+    if not PALANTIR_ENABLED:
+        return
+    top = best_detection(detections)
+    if top is None or top["conf"] < PALANTIR_MIN_CONF:
+        return
+    await asyncio.to_thread(_send_palantir_with_image, detections, source_name, pil_img, event_ts)
 
 
 def should_send_ws_report(detections):
@@ -315,7 +432,7 @@ async def detect_image(
         ms = round((time.time() - t0) * 1000, 1)
         detections = boxes_to_json(results[0], pil_img=img, verify=verify)
         if detections:
-            asyncio.create_task(maybe_send_palantir_report(detections, "image-upload"))
+            asyncio.create_task(maybe_send_palantir_report(detections, "image-upload", pil_img=img))
         return {
             "detections": detections,
             "width": img.width,
@@ -358,6 +475,7 @@ async def detect_video(
     n_hits = 0
     max_conf = 0.0
     best_frame_detections = []
+    best_frame_pil = None
     try:
         idx = 0
         while True:
@@ -386,6 +504,7 @@ async def detect_video(
                     frame_max_conf = max(d["conf"] for d in kept)
                     if frame_max_conf >= max_conf:
                         best_frame_detections = kept
+                        best_frame_pil = pil_frame
             else:
                 annotated = frame
             writer.write(annotated)
@@ -425,7 +544,9 @@ async def detect_video(
         "height": height,
     }
     if best_frame_detections:
-        asyncio.create_task(maybe_send_palantir_report(best_frame_detections, "video-upload"))
+        asyncio.create_task(
+            maybe_send_palantir_report(best_frame_detections, "video-upload", pil_img=best_frame_pil)
+        )
     stats_path.write_text(json.dumps(stats))
     return {"video_url": f"/video/{out_id}", **stats}
 
@@ -436,6 +557,15 @@ async def serve_video(out_id: str):
     if not p.exists():
         raise HTTPException(404, "not found")
     return FileResponse(p, media_type="video/mp4", filename=p.name)
+
+
+@app.get("/snapshot/{snapshot_id}.jpg")
+async def serve_snapshot(snapshot_id: str):
+    """Public URL for the annotated detection snapshot (Palantir image_url)."""
+    p = SNAPSHOT_DIR / f"{snapshot_id}.jpg"
+    if not p.exists():
+        raise HTTPException(404, "not found")
+    return FileResponse(p, media_type="image/jpeg", filename=p.name)
 
 
 @app.websocket("/ws/detect")
@@ -471,7 +601,10 @@ async def ws_detect(ws: WebSocket):
                 ms = round((time.time() - t0) * 1000, 1)
                 if should_send_ws_report(detections):
                     asyncio.create_task(
-                        maybe_send_palantir_report(detections, "live-webcam", event_ts=payload.get("ts"))
+                        maybe_send_palantir_report(
+                            detections, "live-webcam",
+                            event_ts=payload.get("ts"), pil_img=img,
+                        )
                     )
                 try:
                     await ws.send_json({
