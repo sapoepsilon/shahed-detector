@@ -1,0 +1,179 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --bg: #07090b;
+  --bg-grid: rgba(0, 255, 136, 0.04);
+  --ink: #c9d6c2;
+  --ink-dim: #4f6358;
+  --phosphor: #00ff88;
+  --phosphor-dim: #007a3f;
+  --amber: #ffbb00;
+  --crimson: #ff3344;
+  --steel: #19211e;
+
+  --radius: 0;
+
+  --background: var(--bg);
+  --foreground: var(--ink);
+  --card: #0c1014;
+  --card-foreground: var(--ink);
+  --popover: #0c1014;
+  --popover-foreground: var(--ink);
+  --primary: var(--phosphor);
+  --primary-foreground: #07090b;
+  --secondary: #11181a;
+  --secondary-foreground: var(--ink);
+  --muted: #11181a;
+  --muted-foreground: var(--ink-dim);
+  --accent: var(--phosphor-dim);
+  --accent-foreground: var(--ink);
+  --destructive: var(--crimson);
+  --border: rgba(0, 255, 136, 0.18);
+  --input: rgba(0, 255, 136, 0.18);
+  --ring: var(--phosphor);
+  --chart-1: var(--phosphor);
+  --chart-2: var(--amber);
+  --chart-3: #44ccff;
+  --chart-4: #ff66cc;
+  --chart-5: var(--crimson);
+  --sidebar: var(--bg);
+  --sidebar-foreground: var(--ink);
+  --sidebar-primary: var(--phosphor);
+  --sidebar-primary-foreground: var(--bg);
+  --sidebar-accent: var(--secondary);
+  --sidebar-accent-foreground: var(--ink);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--phosphor);
+}
+
+.dark {
+  --background: var(--bg);
+  --foreground: var(--ink);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --font-mono: var(--font-mono);
+  --font-display: var(--font-display);
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+}
+
+* {
+  border-color: var(--border);
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-mono), "IBM Plex Mono", monospace;
+}
+
+body {
+  background-image:
+    linear-gradient(var(--bg-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px),
+    radial-gradient(ellipse at 50% -10%, rgba(0, 255, 136, 0.05), transparent 60%);
+  background-size: 56px 56px, 56px 56px, 100% 100%;
+}
+
+/* Scanline overlay */
+body::after {
+  content: "";
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 255, 136, 0) 0,
+    rgba(0, 255, 136, 0) 2px,
+    rgba(0, 255, 136, 0.025) 3px,
+    rgba(0, 255, 136, 0) 4px
+  );
+  z-index: 999;
+  mix-blend-mode: screen;
+}
+
+/* selection */
+::selection {
+  background: var(--phosphor);
+  color: var(--bg);
+}
+
+/* utilities */
+.font-display { font-family: var(--font-display), monospace; }
+.bracket-frame {
+  position: relative;
+}
+.bracket-frame::before, .bracket-frame::after,
+.bracket-frame > .br1, .bracket-frame > .br2 {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-color: var(--phosphor);
+  border-style: solid;
+}
+.bracket-frame::before { top: -1px; left: -1px; border-width: 1px 0 0 1px; }
+.bracket-frame::after { top: -1px; right: -1px; border-width: 1px 1px 0 0; }
+.bracket-frame > .br1 { bottom: -1px; left: -1px; border-width: 0 0 1px 1px; }
+.bracket-frame > .br2 { bottom: -1px; right: -1px; border-width: 0 1px 1px 0; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.led {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: var(--phosphor);
+  box-shadow: 0 0 6px var(--phosphor);
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+.led-amber { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+.led-red { background: var(--crimson); box-shadow: 0 0 6px var(--crimson); }
+.led-off { background: var(--ink-dim); box-shadow: none; animation: none; }
+
+@keyframes scan-sweep {
+  0% { transform: translateY(-10%); opacity: 0; }
+  10% { opacity: 1; }
+  100% { transform: translateY(110%); opacity: 0; }
+}
+.scan-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(to bottom, transparent, var(--phosphor), transparent);
+  animation: scan-sweep 3.8s linear infinite;
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+.text-phosphor { color: var(--phosphor); }
+.text-amber { color: var(--amber); }
+.text-crimson { color: var(--crimson); }
+.bg-phosphor { background: var(--phosphor); }
