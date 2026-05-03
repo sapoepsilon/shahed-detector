@@ -71,8 +71,15 @@ if USE_CLIP:
         clip_model = CLIPModel.from_pretrained(_CLIP_NAME).to(DEVICE).eval()
         clip_processor = CLIPProcessor.from_pretrained(_CLIP_NAME)
         with torch.no_grad():
-            tokens = clip_processor(text=[t for _, t in CLIP_LABELS], return_tensors="pt", padding=True).to(DEVICE)
-            tf = clip_model.get_text_features(**tokens)
+            tokens = clip_processor(
+                text=[t for _, t in CLIP_LABELS], return_tensors="pt", padding=True,
+            )
+            input_ids = tokens["input_ids"].to(DEVICE)
+            attention_mask = tokens["attention_mask"].to(DEVICE)
+            tf = clip_model.get_text_features(input_ids=input_ids, attention_mask=attention_mask)
+            if not isinstance(tf, torch.Tensor):
+                # some versions return BaseModelOutputWithPooling
+                tf = tf.pooler_output if hasattr(tf, "pooler_output") else tf.last_hidden_state.mean(dim=1)
             clip_text_features = tf / tf.norm(dim=-1, keepdim=True)
         print("CLIP ready", flush=True)
     except Exception as e:
@@ -94,10 +101,13 @@ def clip_verify(pil_img: Image.Image, xyxy) -> dict:
         return {"label": "other", "score": 0.0, "accepted": False}
     crop = pil_img.crop((x1, y1, x2, y2))
     with torch.no_grad():
-        inputs = clip_processor(images=crop, return_tensors="pt").to(DEVICE)
-        feats = clip_model.get_image_features(**inputs)
+        inputs = clip_processor(images=crop, return_tensors="pt")
+        pixel_values = inputs["pixel_values"].to(DEVICE)
+        feats = clip_model.get_image_features(pixel_values=pixel_values)
+        if not isinstance(feats, torch.Tensor):
+            feats = feats.pooler_output if hasattr(feats, "pooler_output") else feats.last_hidden_state.mean(dim=1)
         feats = feats / feats.norm(dim=-1, keepdim=True)
-        sims = (feats @ clip_text_features.T)[0]
+        sims = (feats @ clip_text_features.T)[0] * 100  # scale for sharper softmax
         probs = sims.softmax(dim=-1)
     idx = int(probs.argmax())
     label = CLIP_LABELS[idx][0]
