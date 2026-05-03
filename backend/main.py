@@ -7,6 +7,9 @@ import shutil
 import tempfile
 import time
 import uuid
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -30,6 +33,27 @@ MODEL_PATH = ROOT / "model" / "best.pt"
 OUT_DIR = ROOT / "outputs"
 OUT_DIR.mkdir(exist_ok=True)
 
+# ---- Palantir Foundry alerting ----
+PALANTIR_API_URL = os.getenv("PALANTIR_API_URL", "https://nshackathon.palantirfoundry.com")
+PALANTIR_TOKEN = os.getenv("FOUNDRY_TOKEN") or os.getenv("PALANTIR_TOKEN")
+PALANTIR_ONTOLOGY_RID = os.getenv(
+    "PALANTIR_ONTOLOGY_RID",
+    "ri.ontology.main.ontology.41fccd0c-2180-4c1d-841d-8a488d1abb46",
+)
+PALANTIR_ACTION_NAME = os.getenv(
+    "PALANTIR_ACTION_NAME",
+    "add-one-state-callout63bf71f1-1337-4730-ab85-576c4b361534",
+)
+PALANTIR_LINK_TEXT = os.getenv("PALANTIR_LINK_TEXT", "Open detector")
+PALANTIR_LINK_URL = os.getenv(
+    "PALANTIR_LINK_URL",
+    "https://shahed-detector.panda-anaconda.ts.net",
+)
+PALANTIR_MIN_CONF = float(os.getenv("PALANTIR_MIN_CONF", "0.80"))
+PALANTIR_WS_MIN_INTERVAL_S = float(os.getenv("PALANTIR_WS_MIN_INTERVAL_S", "10"))
+PALANTIR_ENABLED = bool(PALANTIR_TOKEN) and os.getenv("PALANTIR_ENABLE_REPORTS", "1") != "0"
+_LAST_WS_REPORT_AT = 0.0
+
 # pick best device: cuda > mps > cpu
 if torch.cuda.is_available():
     DEVICE = "cuda"
@@ -43,25 +67,27 @@ model = YOLO(str(MODEL_PATH))
 # warm up
 _ = model.predict(np.zeros((640, 640, 3), dtype=np.uint8), verbose=False, device=DEVICE)
 print("model ready", flush=True)
+print(f"palantir reporting {'enabled' if PALANTIR_ENABLED else 'disabled'}", flush=True)
 
-# ---- CLIP zero-shot verifier (post-processing for false positives) ----
+# ---- CLIP zero-shot verifier (post-process false positives) ----
 USE_CLIP = os.environ.get("USE_CLIP", "1") != "0"
 clip_model = None
 clip_processor = None
 clip_text_features = None
 
 CLIP_LABELS = [
-    ("shahed",         "a photo of a Shahed-136 or Geran-2 kamikaze drone, delta-wing strike UAV"),
-    ("bird",           "a photo of a bird flying or perched, silhouette"),
-    ("airplane",       "a photo of an airplane or jet aircraft in the sky"),
-    ("kite",           "a photo of a recreational kite flying"),
-    ("balloon",        "a photo of a balloon in the sky"),
-    ("paper_plane",    "a photo of a paper airplane"),
-    ("missile",        "a photo of a cruise missile or rocket in flight"),
-    ("quadcopter",     "a photo of a quadcopter or DJI consumer drone"),
-    ("cloud",          "a photo of a cloud in the sky"),
-    ("other",          "a photo of something unrelated"),
+    ("shahed",       "a photo of a Shahed-136 or Geran-2 kamikaze drone, delta-wing strike UAV"),
+    ("bird",         "a photo of a bird flying or perched, silhouette"),
+    ("airplane",     "a photo of an airplane or jet aircraft in the sky"),
+    ("kite",         "a photo of a recreational kite flying"),
+    ("balloon",      "a photo of a balloon in the sky"),
+    ("paper_plane",  "a photo of a paper airplane"),
+    ("missile",      "a photo of a cruise missile or rocket in flight"),
+    ("quadcopter",   "a photo of a quadcopter or DJI consumer drone"),
+    ("cloud",        "a photo of a cloud in the sky"),
+    ("other",        "a photo of something unrelated"),
 ]
+REJECT_LABELS = {"bird", "kite", "balloon", "paper_plane", "cloud", "other"}
 
 if USE_CLIP:
     try:
@@ -71,33 +97,39 @@ if USE_CLIP:
         clip_model = CLIPModel.from_pretrained(_CLIP_NAME).to(DEVICE).eval()
         clip_processor = CLIPProcessor.from_pretrained(_CLIP_NAME)
         with torch.no_grad():
-            tokens = clip_processor(
-                text=[t for _, t in CLIP_LABELS], return_tensors="pt", padding=True,
+            tok = clip_processor(text=[t for _, t in CLIP_LABELS], return_tensors="pt", padding=True)
+            tf = clip_model.get_text_features(
+                input_ids=tok["input_ids"].to(DEVICE),
+                attention_mask=tok["attention_mask"].to(DEVICE),
             )
-            input_ids = tokens["input_ids"].to(DEVICE)
-            attention_mask = tokens["attention_mask"].to(DEVICE)
-            tf = clip_model.get_text_features(input_ids=input_ids, attention_mask=attention_mask)
             if not isinstance(tf, torch.Tensor):
-                # some versions return BaseModelOutputWithPooling
                 tf = tf.pooler_output if hasattr(tf, "pooler_output") else tf.last_hidden_state.mean(dim=1)
             clip_text_features = tf / tf.norm(dim=-1, keepdim=True)
         print("CLIP ready", flush=True)
     except Exception as e:
-        print(f"CLIP unavailable ({e}); skipping verifier", flush=True)
+        print(f"CLIP unavailable ({e}); continuing without verifier", flush=True)
         clip_model = None
 
 
-REJECT_LABELS = {"bird", "kite", "balloon", "paper_plane", "cloud", "other"}
+# ---- post-process filters ----
+MIN_BOX_FRAC = float(os.environ.get("MIN_BOX_FRAC", "0.0006"))
+MIN_ASPECT = float(os.environ.get("MIN_ASPECT", "0.5"))
+MAX_ASPECT = float(os.environ.get("MAX_ASPECT", "5.0"))
+
+
+def passes_geometry(xyxy, img_w: int, img_h: int) -> bool:
+    x1, y1, x2, y2 = xyxy
+    w = max(0.0, x2 - x1)
+    h = max(0.0, y2 - y1)
+    if w <= 0 or h <= 0 or img_w <= 0 or img_h <= 0:
+        return False
+    if (w * h) / (img_w * img_h) < MIN_BOX_FRAC:
+        return False
+    aspect = w / h
+    return MIN_ASPECT <= aspect <= MAX_ASPECT
 
 
 def clip_verify(pil_img: Image.Image, xyxy) -> dict:
-    """Crop the bbox + run CLIP zero-shot.
-
-    Strategy: ACCEPT unless CLIP's top label is clearly a non-threat
-    (bird/kite/balloon/paper_plane/cloud/other). Shahed is visually
-    similar to cruise missiles & airplanes — those are kept since they're
-    relevant aerial threats and the YOLO model already predicted shahed.
-    """
     if clip_model is None:
         return {"label": "shahed", "score": 1.0, "accepted": True}
     x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
@@ -110,8 +142,7 @@ def clip_verify(pil_img: Image.Image, xyxy) -> dict:
     crop = pil_img.crop((x1, y1, x2, y2))
     with torch.no_grad():
         inputs = clip_processor(images=crop, return_tensors="pt")
-        pixel_values = inputs["pixel_values"].to(DEVICE)
-        feats = clip_model.get_image_features(pixel_values=pixel_values)
+        feats = clip_model.get_image_features(pixel_values=inputs["pixel_values"].to(DEVICE))
         if not isinstance(feats, torch.Tensor):
             feats = feats.pooler_output if hasattr(feats, "pooler_output") else feats.last_hidden_state.mean(dim=1)
         feats = feats / feats.norm(dim=-1, keepdim=True)
@@ -119,30 +150,12 @@ def clip_verify(pil_img: Image.Image, xyxy) -> dict:
         probs = sims.softmax(dim=-1)
     idx = int(probs.argmax())
     label = CLIP_LABELS[idx][0]
-    score = float(probs[idx])
-    accepted = label not in REJECT_LABELS
-    return {"label": label, "score": round(score, 3), "accepted": accepted}
+    return {
+        "label": label,
+        "score": round(float(probs[idx]), 3),
+        "accepted": label not in REJECT_LABELS,
+    }
 
-
-# ---- post-process filters ----
-MIN_BOX_FRAC = float(os.environ.get("MIN_BOX_FRAC", "0.0006"))   # 0.06% of image area
-MIN_ASPECT = float(os.environ.get("MIN_ASPECT", "0.5"))          # w/h
-MAX_ASPECT = float(os.environ.get("MAX_ASPECT", "5.0"))
-
-
-def passes_geometry(xyxy, img_w: int, img_h: int) -> bool:
-    x1, y1, x2, y2 = xyxy
-    w = max(0.0, x2 - x1)
-    h = max(0.0, y2 - y1)
-    if w <= 0 or h <= 0:
-        return False
-    area_frac = (w * h) / max(1, img_w * img_h)
-    if area_frac < MIN_BOX_FRAC:
-        return False
-    aspect = w / h
-    if aspect < MIN_ASPECT or aspect > MAX_ASPECT:
-        return False
-    return True
 
 app = FastAPI(title="Shahed Detector")
 app.add_middleware(
@@ -155,7 +168,7 @@ app.add_middleware(
 
 
 def boxes_to_json(r, pil_img: Image.Image | None = None, verify: bool = True):
-    """Convert YOLO Boxes → JSON. Filter by geometry + (optionally) CLIP."""
+    """YOLO Boxes → JSON with optional geometry + CLIP filter."""
     out = []
     if r.boxes is None:
         return out
@@ -164,7 +177,6 @@ def boxes_to_json(r, pil_img: Image.Image | None = None, verify: bool = True):
     for b in r.boxes:
         cls_id = int(b.cls)
         xyxy = [round(float(x), 2) for x in b.xyxy[0].tolist()]
-        # geometry filter
         if img_w and img_h and not passes_geometry(xyxy, img_w, img_h):
             continue
         det = {
@@ -173,7 +185,6 @@ def boxes_to_json(r, pil_img: Image.Image | None = None, verify: bool = True):
             "conf": float(b.conf),
             "xyxy": xyxy,
         }
-        # CLIP verify
         if verify and pil_img is not None and clip_model is not None:
             v = clip_verify(pil_img, xyxy)
             det["clip"] = v
@@ -181,6 +192,95 @@ def boxes_to_json(r, pil_img: Image.Image | None = None, verify: bool = True):
                 continue
         out.append(det)
     return out
+
+
+# ---- Palantir helpers ----
+def best_detection(detections):
+    if not detections:
+        return None
+    return max(detections, key=lambda d: d["conf"])
+
+
+def iso_timestamp(value=None):
+    if isinstance(value, (int, float)):
+        if value > 1_000_000_000_000:
+            value /= 1000
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    if isinstance(value, str) and value:
+        return value
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def build_palantir_report(detections, source_name, event_ts=None):
+    if not PALANTIR_ENABLED:
+        return None
+    top = best_detection(detections)
+    if top is None or top["conf"] < PALANTIR_MIN_CONF:
+        return None
+    top_conf_pct = round(top["conf"] * 100)
+    event_time = iso_timestamp(event_ts)
+    bbox = ", ".join(str(round(v, 1)) for v in top["xyxy"])
+    return {
+        "parameters": {
+            "title": f"AIR THREAT ALERT // {top['class'].upper()} // {top_conf_pct}%",
+            "text": (
+                f"SOURCE: {source_name}\n"
+                f"TIME: {event_time}\n"
+                f"DETECTIONS: {len(detections)}\n"
+                f"TOP CONFIDENCE: {top_conf_pct}%\n"
+                f"TOP BBOX: [{bbox}]"
+            ),
+            "link_text": "OPEN LIVE DETECTOR",
+            "link_url": PALANTIR_LINK_URL,
+        }
+    }
+
+
+def post_palantir_report(payload):
+    url = (
+        f"{PALANTIR_API_URL}/api/v2/ontologies/{PALANTIR_ONTOLOGY_RID}/"
+        f"actions/{PALANTIR_ACTION_NAME}/apply"
+    )
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {PALANTIR_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        print(f"palantir report failed: {exc.code} {detail}", flush=True)
+        return
+    except Exception as exc:
+        print(f"palantir report failed: {exc}", flush=True)
+        return
+    if body.get("validation", {}).get("result") not in (None, "VALID"):
+        print(f"palantir report rejected: {body}", flush=True)
+
+
+async def maybe_send_palantir_report(detections, source_name, event_ts=None):
+    payload = build_palantir_report(detections, source_name, event_ts=event_ts)
+    if payload is None:
+        return
+    await asyncio.to_thread(post_palantir_report, payload)
+
+
+def should_send_ws_report(detections):
+    global _LAST_WS_REPORT_AT
+    top = best_detection(detections)
+    if top is None or top["conf"] < PALANTIR_MIN_CONF:
+        return False
+    now = time.monotonic()
+    if now - _LAST_WS_REPORT_AT < PALANTIR_WS_MIN_INTERVAL_S:
+        return False
+    _LAST_WS_REPORT_AT = now
+    return True
 
 
 @app.get("/health")
@@ -191,6 +291,7 @@ async def health():
         "device": DEVICE,
         "classes": list(model.names.values()) if hasattr(model, "names") else [],
         "clip": clip_model is not None,
+        "palantir": PALANTIR_ENABLED,
         "filters": {
             "min_box_frac": MIN_BOX_FRAC,
             "min_aspect": MIN_ASPECT,
@@ -212,8 +313,11 @@ async def detect_image(
         t0 = time.time()
         results = model.predict(arr, conf=conf, verbose=False, device=DEVICE, imgsz=640)
         ms = round((time.time() - t0) * 1000, 1)
+        detections = boxes_to_json(results[0], pil_img=img, verify=verify)
+        if detections:
+            asyncio.create_task(maybe_send_palantir_report(detections, "image-upload"))
         return {
-            "detections": boxes_to_json(results[0], pil_img=img, verify=verify),
+            "detections": detections,
             "width": img.width,
             "height": img.height,
             "inference_ms": ms,
@@ -234,7 +338,7 @@ async def detect_video(
     in_path = OUT_DIR / f"in_{uuid.uuid4().hex}{suffix}"
     out_id = uuid.uuid4().hex
     raw_out_path = OUT_DIR / f"raw_{out_id}.mp4"
-    out_path = OUT_DIR / f"out_{out_id}.mp4"  # H.264 browser-playable (after ffmpeg transcode)
+    out_path = OUT_DIR / f"out_{out_id}.mp4"  # H.264 browser-playable
     stats_path = OUT_DIR / f"stats_{out_id}.json"
 
     with open(in_path, "wb") as f:
@@ -247,14 +351,13 @@ async def detect_video(
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    # any codec — we transcode after
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(raw_out_path), fourcc, fps, (width, height))
 
     n_frames = 0
     n_hits = 0
     max_conf = 0.0
-    last_seen = -1
+    best_frame_detections = []
     try:
         idx = 0
         while True:
@@ -264,13 +367,11 @@ async def detect_video(
             if idx % sample_every == 0:
                 results = model.predict(frame, conf=conf, verbose=False, device=DEVICE, imgsz=640)
                 r = results[0]
-                # filter detections by geometry + CLIP, then redraw cleanly
                 pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                 kept = boxes_to_json(r, pil_img=pil_frame, verify=verify)
                 annotated = frame.copy()
                 if kept:
                     n_hits += 1
-                    last_seen = idx
                     for d in kept:
                         x1, y1, x2, y2 = [int(v) for v in d["xyxy"]]
                         c = d["conf"]
@@ -282,6 +383,9 @@ async def detect_video(
                             (x1, max(20, y1 - 6)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2,
                         )
+                    frame_max_conf = max(d["conf"] for d in kept)
+                    if frame_max_conf >= max_conf:
+                        best_frame_detections = kept
             else:
                 annotated = frame
             writer.write(annotated)
@@ -292,7 +396,7 @@ async def detect_video(
         writer.release()
         in_path.unlink(missing_ok=True)
 
-    # transcode to H.264/AAC mp4 with faststart so browsers can stream-play
+    # transcode to H.264 mp4 with faststart so browsers can stream-play
     import subprocess
     transcode = subprocess.run(
         [
@@ -301,13 +405,12 @@ async def detect_video(
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
-            "-an",  # no audio
+            "-an",
             str(out_path),
         ],
         capture_output=True, text=True,
     )
     if transcode.returncode != 0 or not out_path.exists():
-        # fall back to raw if ffmpeg unavailable
         raw_out_path.rename(out_path)
     else:
         raw_out_path.unlink(missing_ok=True)
@@ -321,6 +424,8 @@ async def detect_video(
         "width": width,
         "height": height,
     }
+    if best_frame_detections:
+        asyncio.create_task(maybe_send_palantir_report(best_frame_detections, "video-upload"))
     stats_path.write_text(json.dumps(stats))
     return {"video_url": f"/video/{out_id}", **stats}
 
@@ -342,8 +447,10 @@ async def ws_detect(ws: WebSocket):
         while True:
             msg = await ws.receive_text()
             if busy:
-                # drop frame: client should not flood; we send a tick back so it knows we're alive
-                await ws.send_json({"dropped": True})
+                try:
+                    await ws.send_json({"dropped": True})
+                except Exception:
+                    return
                 continue
             busy = True
             try:
@@ -357,24 +464,30 @@ async def ws_detect(ws: WebSocket):
                 img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                 arr = np.array(img)
                 t0 = time.time()
-                # run in thread so we don't block event loop
                 results = await asyncio.to_thread(
                     model.predict, arr, conf=conf, verbose=False, device=DEVICE, imgsz=640
                 )
-                # CLIP verify can be slow; do off the event loop too
-                detections = await asyncio.to_thread(
-                    boxes_to_json, results[0], img, verify
-                )
+                detections = await asyncio.to_thread(boxes_to_json, results[0], img, verify)
                 ms = round((time.time() - t0) * 1000, 1)
-                await ws.send_json({
-                    "detections": detections,
-                    "width": img.width,
-                    "height": img.height,
-                    "inference_ms": ms,
-                    "ts": payload.get("ts"),
-                })
+                if should_send_ws_report(detections):
+                    asyncio.create_task(
+                        maybe_send_palantir_report(detections, "live-webcam", event_ts=payload.get("ts"))
+                    )
+                try:
+                    await ws.send_json({
+                        "detections": detections,
+                        "width": img.width,
+                        "height": img.height,
+                        "inference_ms": ms,
+                        "ts": payload.get("ts"),
+                    })
+                except Exception:
+                    return
             except Exception as e:
-                await ws.send_json({"error": str(e)})
+                try:
+                    await ws.send_json({"error": str(e)})
+                except Exception:
+                    return
             finally:
                 busy = False
     except WebSocketDisconnect:
