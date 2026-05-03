@@ -53,7 +53,7 @@ export function VideoPanel() {
         {busy && (
           <div className="absolute inset-0 grid place-items-center bg-[rgba(7,9,11,0.85)]">
             <div className="text-center space-y-3">
-              <div className="text-[var(--phosphor)] text-xs tracking-[0.4em]">// {progressLabel}</div>
+              <div className="text-[var(--accent)] text-xs tracking-[0.4em]">// {progressLabel}</div>
               <div className="font-display text-3xl tracking-widest">analyzing</div>
               <div className="text-[var(--ink-dim)] text-[10px] tracking-widest">FRAME-BY-FRAME · DO NOT NAVIGATE AWAY</div>
             </div>
@@ -80,7 +80,7 @@ export function VideoPanel() {
         <span className="br1" /><span className="br2" />
         <header className="px-4 py-3 border-b border-[var(--border)] text-[11px] tracking-[0.3em] flex items-center justify-between">
           <span>// REPORT</span>
-          <span className="text-[var(--phosphor)]">{pct}%</span>
+          <span className="text-[var(--accent)]">{pct}%</span>
         </header>
         <div className="px-4 py-3 space-y-2 text-[11px] tracking-widest">
           {[
@@ -100,13 +100,13 @@ export function VideoPanel() {
           <a
             href={`${API_BASE}${result.video_url}`}
             download
-            className="text-center border border-[var(--border)] hover:border-[var(--phosphor)] px-3 py-2 text-[10px] tracking-[0.3em]"
+            className="text-center border border-[var(--border)] hover:border-[var(--accent)] px-3 py-2 text-[10px] tracking-[0.3em]"
           >
             ⤓ DOWNLOAD
           </a>
           <button
             onClick={() => setResult(null)}
-            className="border border-[var(--border)] hover:border-[var(--phosphor)] px-3 py-2 text-[10px] tracking-[0.3em]"
+            className="border border-[var(--border)] hover:border-[var(--accent)] px-3 py-2 text-[10px] tracking-[0.3em]"
           >
             ⟲ NEW
           </button>

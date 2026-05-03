@@ -71,7 +71,7 @@ export function ImagePanel() {
         <span className="br1" /><span className="br2" />
         <header className="px-4 py-3 border-b border-[var(--border)] flex items-center justify-between text-[11px] tracking-[0.3em]">
           <span>// DETECTIONS</span>
-          <span className="text-[var(--phosphor)]">{detections.length}</span>
+          <span className="text-[var(--accent)]">{detections.length}</span>
         </header>
         <div className="flex-1 overflow-auto">
           <DetectionList detections={detections} />
@@ -83,7 +83,7 @@ export function ImagePanel() {
           </div>
           <div className="flex justify-between">
             <span>INFERENCE</span>
-            <span className="text-[var(--phosphor)] tabular-nums">{ms != null ? `${ms} ms` : "—"}</span>
+            <span className="text-[var(--accent)] tabular-nums">{ms != null ? `${ms} ms` : "—"}</span>
           </div>
           <label className="flex items-center justify-between gap-2">
             <span>CONF MIN</span>
@@ -98,13 +98,13 @@ export function ImagePanel() {
                 setConf(v);
                 if (file) run(file, v);
               }}
-              className="accent-[var(--phosphor)]"
+              className="accent-[var(--accent)]"
             />
             <span className="text-[var(--ink)] tabular-nums w-8 text-right">{conf.toFixed(2)}</span>
           </label>
           {imgEl && (
             <button
-              className="w-full mt-2 border border-[var(--border)] hover:border-[var(--phosphor)] px-3 py-2 text-[10px] tracking-[0.3em]"
+              className="w-full mt-2 border border-[var(--border)] hover:border-[var(--accent)] px-3 py-2 text-[10px] tracking-[0.3em]"
               onClick={() => {
                 if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
                 setImgEl(null);
@@ -116,7 +116,7 @@ export function ImagePanel() {
               ⟲ NEW SOURCE
             </button>
           )}
-          {busy && <div className="text-[var(--phosphor)] tracking-widest pt-1">PROCESSING…</div>}
+          {busy && <div className="text-[var(--accent)] tracking-widest pt-1">PROCESSING…</div>}
         </footer>
       </aside>
     </div>

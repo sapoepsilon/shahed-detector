@@ -37,7 +37,7 @@ export function LivePanel() {
       const ww = x2 - x1;
       const hh = y2 - y1;
       const conf = d.conf;
-      const color = conf > 0.6 ? "#00ff88" : conf > 0.35 ? "#ffbb00" : "#ff3344";
+      const color = conf > 0.6 ? "#b794f6" : conf > 0.35 ? "#ffd166" : "#ff5c8a";
       const t = Math.max(2, Math.min(ww, hh) * 0.04);
       const len = Math.max(10, Math.min(ww, hh) * 0.18);
       ctx.lineWidth = t;
@@ -53,12 +53,12 @@ export function LivePanel() {
       ctx.shadowBlur = 0;
       const fs = Math.max(14, Math.min(w / 50, 22));
       const label = `${d.class.toUpperCase()} ${(conf * 100).toFixed(0)}%`;
-      ctx.font = `${fs}px "IBM Plex Mono", monospace`;
+      ctx.font = `600 ${fs}px "JetBrains Mono", monospace`;
       const tw = ctx.measureText(label).width;
       const ly = Math.max(0, y1 - fs - 8);
       ctx.fillStyle = color;
       ctx.fillRect(x1, ly, tw + 12, fs + 8);
-      ctx.fillStyle = "#07090b";
+      ctx.fillStyle = "#08090e";
       ctx.fillText(label, x1 + 6, ly + fs + 2);
     }
   }, []);
@@ -184,11 +184,11 @@ export function LivePanel() {
           <div className="grid place-items-center py-20">
             <button
               onClick={start}
-              className="bracket-frame px-10 py-5 border border-[var(--phosphor)] hover:bg-[rgba(0,255,136,0.08)] transition"
+              className="bracket-frame px-10 py-5 border border-[var(--accent)] hover:bg-[rgba(183,148,246,0.08)] transition"
             >
               <span className="br1" /><span className="br2" />
               <div className="text-[10px] tracking-[0.5em] mb-1">// ENGAGE</div>
-              <div className="text-2xl font-display tracking-widest text-[var(--phosphor)]">webcam</div>
+              <div className="text-2xl font-display tracking-widest text-[var(--accent)]">webcam</div>
             </button>
           </div>
         )}
@@ -209,11 +209,11 @@ export function LivePanel() {
         <footer className="border-t border-[var(--border)] px-4 py-3 text-[10px] tracking-widest text-[var(--ink-dim)] space-y-2">
           <div className="flex justify-between">
             <span>FPS</span>
-            <span className="text-[var(--phosphor)] tabular-nums">{fps.toFixed(1)}</span>
+            <span className="text-[var(--accent)] tabular-nums">{fps.toFixed(1)}</span>
           </div>
           <div className="flex justify-between">
             <span>LATENCY</span>
-            <span className="text-[var(--phosphor)] tabular-nums">{latency != null ? `${latency} ms` : "—"}</span>
+            <span className="text-[var(--accent)] tabular-nums">{latency != null ? `${latency} ms` : "—"}</span>
           </div>
           <div className="flex justify-between">
             <span>TARGETS</span>
@@ -221,7 +221,7 @@ export function LivePanel() {
           </div>
           <button
             onClick={running ? stop : start}
-            className="w-full mt-2 border border-[var(--border)] hover:border-[var(--phosphor)] px-3 py-2 text-[10px] tracking-[0.3em]"
+            className="w-full mt-2 border border-[var(--border)] hover:border-[var(--accent)] px-3 py-2 text-[10px] tracking-[0.3em]"
           >
             {running ? "■ DISENGAGE" : "▶ ENGAGE"}
           </button>

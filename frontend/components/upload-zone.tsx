@@ -39,7 +39,7 @@ export function UploadZone({ accept, onFile, label, hint, className }: Props) {
       onClick={() => inputRef.current?.click()}
       className={cn(
         "bracket-frame relative cursor-pointer select-none border border-dashed border-[var(--border)] py-14 px-8 text-center transition-colors",
-        drag ? "bg-[rgba(0,255,136,0.06)] border-[var(--phosphor)]" : "hover:border-[var(--phosphor)]",
+        drag ? "bg-[rgba(183,148,246,0.06)] border-[var(--accent)]" : "hover:border-[var(--accent)]",
         className,
       )}
     >
@@ -55,7 +55,7 @@ export function UploadZone({ accept, onFile, label, hint, className }: Props) {
           if (f) onFile(f);
         }}
       />
-      <div className="text-[var(--phosphor)] text-xs tracking-[0.4em] mb-3 uppercase">
+      <div className="text-[var(--accent)] text-xs tracking-[0.4em] mb-3 uppercase">
         // ACQUISITION
       </div>
       <div className="text-2xl font-display tracking-widest mb-3">{label}</div>

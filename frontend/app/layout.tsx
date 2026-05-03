@@ -1,22 +1,28 @@
 import type { Metadata } from "next";
-import { IBM_Plex_Mono, Major_Mono_Display } from "next/font/google";
+import { JetBrains_Mono, Doto, Fragment_Mono } from "next/font/google";
 import { Toaster } from "@/components/ui/sonner";
 import "./globals.css";
 
-const mono = IBM_Plex_Mono({
+const mono = JetBrains_Mono({
   subsets: ["latin"],
-  weight: ["300", "400", "500", "600", "700"],
+  weight: ["300", "400", "500", "600", "700", "800"],
   variable: "--font-mono",
 });
 
-const display = Major_Mono_Display({
+const display = Doto({
   subsets: ["latin"],
-  weight: ["400"],
+  weight: ["400", "500", "700", "800", "900"],
   variable: "--font-display",
 });
 
+const accent = Fragment_Mono({
+  subsets: ["latin"],
+  weight: ["400"],
+  variable: "--font-accent",
+});
+
 export const metadata: Metadata = {
-  title: "SHAHED // DETECTOR",
+  title: "shahed // detector",
   description: "Real-time UAV identification terminal",
 };
 
@@ -24,7 +30,10 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`dark ${mono.variable} ${display.variable}`}>
+    <html
+      lang="en"
+      className={`dark ${mono.variable} ${display.variable} ${accent.variable}`}
+    >
       <body className="min-h-screen font-mono antialiased bg-[var(--bg)] text-[var(--ink)]">
         {children}
         <Toaster
@@ -34,9 +43,10 @@ export default function RootLayout({
             style: {
               fontFamily: "var(--font-mono)",
               borderRadius: 0,
-              border: "1px solid var(--phosphor)",
-              background: "#0a0a0c",
-              color: "var(--phosphor)",
+              border: "1px solid var(--accent)",
+              background: "var(--card)",
+              color: "var(--ink)",
+              boxShadow: "0 0 24px rgba(159, 122, 234, 0.18)",
             },
           }}
         />
