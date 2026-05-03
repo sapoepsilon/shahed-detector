@@ -67,24 +67,33 @@ SNAPSHOT_DIR.mkdir(exist_ok=True)
 ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY", "")
 ROBOFLOW_MODEL_ID = os.getenv("ROBOFLOW_MODEL_ID", "shahed-ubivw-jg1sy/1")
 ROBOFLOW_API_URL = os.getenv("ROBOFLOW_API_URL", "https://serverless.roboflow.com")
-# DEFAULT_ENGINE: "local" (yolo26l on GPU) or "roboflow" (their hosted model)
 DEFAULT_ENGINE = os.getenv("DEFAULT_ENGINE", "roboflow" if ROBOFLOW_API_KEY else "local").lower()
-_rf_client = None  # lazy InferenceHTTPClient
 
-def get_rf_client():
-    global _rf_client
-    if _rf_client is None:
-        try:
-            from inference_sdk import InferenceHTTPClient
-            _rf_client = InferenceHTTPClient(
-                api_url=ROBOFLOW_API_URL,
-                api_key=ROBOFLOW_API_KEY,
-            )
-            print(f"roboflow client ready: {ROBOFLOW_MODEL_ID} via {ROBOFLOW_API_URL}", flush=True)
-        except Exception as e:
-            print(f"roboflow client unavailable: {e}", flush=True)
-            _rf_client = False  # don't retry
-    return _rf_client if _rf_client else None
+
+def roboflow_infer(arr_or_pil, conf: float):
+    """Direct HTTP to Roboflow's serverless endpoint. No SDK (inference-sdk
+    requires Python <3.13). Returns the parsed Roboflow JSON."""
+    if not ROBOFLOW_API_KEY:
+        raise RuntimeError("ROBOFLOW_API_KEY not set")
+    # Encode image as JPEG → base64 (Roboflow's expected format)
+    if hasattr(arr_or_pil, "shape"):
+        # numpy array — assume RGB
+        from PIL import Image as _PIL
+        pil = _PIL.fromarray(arr_or_pil)
+    else:
+        pil = arr_or_pil
+    buf = io.BytesIO()
+    pil.save(buf, format="JPEG", quality=85)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    rf_conf = max(1, int(round(conf * 100)))
+    url = f"{ROBOFLOW_API_URL}/{ROBOFLOW_MODEL_ID}?api_key={ROBOFLOW_API_KEY}&confidence={rf_conf}"
+    req = urllib.request.Request(
+        url, data=b64.encode(),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8") or "{}")
 
 # pick best device: cuda > mps > cpu
 if torch.cuda.is_available():
@@ -257,38 +266,16 @@ def roboflow_to_json(rf_result, pil_img: Image.Image | None = None, verify: bool
 
 
 def run_inference(arr_or_img, conf: float, engine: str | None = None):
-    """Returns (raw_result, json_converter). Caller does:
-        result = run_inference(arr, conf, engine)
-        detections = result['convert'](pil_img, verify)
-    """
+    """Returns (engine_name, raw_result)."""
     eng = (engine or DEFAULT_ENGINE).lower()
     if eng == "roboflow" and ROBOFLOW_API_KEY:
-        client = get_rf_client()
-        if client is not None:
-            try:
-                # Roboflow expects 0-100 confidence
-                rf_conf = int(round(conf * 100))
-                # InferenceHTTPClient accepts numpy arrays directly
-                rf_result = client.infer(
-                    arr_or_img if hasattr(arr_or_img, "shape") else np.array(arr_or_img),
-                    model_id=ROBOFLOW_MODEL_ID,
-                )
-                # Some clients return list for batched calls
-                if isinstance(rf_result, list):
-                    rf_result = rf_result[0]
-                # Apply confidence filter (Roboflow returns at low conf)
-                rf_result["predictions"] = [
-                    p for p in rf_result.get("predictions", [])
-                    if float(p.get("confidence", 0)) >= conf
-                ]
-                return ("roboflow", rf_result)
-            except Exception as e:
-                print(f"roboflow infer error, falling back to local: {e}", flush=True)
+        try:
+            rf_result = roboflow_infer(arr_or_img, conf)
+            return ("roboflow", rf_result)
+        except Exception as e:
+            print(f"roboflow infer error, falling back to local: {e}", flush=True)
     # local yolo
-    if hasattr(arr_or_img, "shape"):
-        arr = arr_or_img
-    else:
-        arr = np.array(arr_or_img)
+    arr = arr_or_img if hasattr(arr_or_img, "shape") else np.array(arr_or_img)
     results = model.predict(arr, conf=conf, verbose=False, device=DEVICE, imgsz=640)
     return ("local", results[0])
 
