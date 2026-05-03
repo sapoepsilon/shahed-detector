@@ -1,0 +1,30 @@
+# deps
+node_modules/
+**/node_modules/
+**/.next/
+**/.turbo/
+**/out/
+
+# python
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+
+# model + outputs (too large for git; users pull from HF)
+backend/model/best.pt
+backend/outputs/
+
+# env
+.env
+.env.local
+.env.*.local
+**/.env*
+
+# editor
+.DS_Store
+.vscode/
+.idea/
+
+# logs
+*.log
