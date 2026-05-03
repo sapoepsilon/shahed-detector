@@ -63,6 +63,29 @@ _LAST_WS_REPORT_AT = 0.0
 SNAPSHOT_DIR = OUT_DIR / "snapshots"
 SNAPSHOT_DIR.mkdir(exist_ok=True)
 
+# ---- Roboflow inference engine (alternative to local YOLO) ----
+ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY", "")
+ROBOFLOW_MODEL_ID = os.getenv("ROBOFLOW_MODEL_ID", "shahed-ubivw-jg1sy/1")
+ROBOFLOW_API_URL = os.getenv("ROBOFLOW_API_URL", "https://serverless.roboflow.com")
+# DEFAULT_ENGINE: "local" (yolo26l on GPU) or "roboflow" (their hosted model)
+DEFAULT_ENGINE = os.getenv("DEFAULT_ENGINE", "roboflow" if ROBOFLOW_API_KEY else "local").lower()
+_rf_client = None  # lazy InferenceHTTPClient
+
+def get_rf_client():
+    global _rf_client
+    if _rf_client is None:
+        try:
+            from inference_sdk import InferenceHTTPClient
+            _rf_client = InferenceHTTPClient(
+                api_url=ROBOFLOW_API_URL,
+                api_key=ROBOFLOW_API_KEY,
+            )
+            print(f"roboflow client ready: {ROBOFLOW_MODEL_ID} via {ROBOFLOW_API_URL}", flush=True)
+        except Exception as e:
+            print(f"roboflow client unavailable: {e}", flush=True)
+            _rf_client = False  # don't retry
+    return _rf_client if _rf_client else None
+
 # pick best device: cuda > mps > cpu
 if torch.cuda.is_available():
     DEVICE = "cuda"
@@ -201,6 +224,80 @@ def boxes_to_json(r, pil_img: Image.Image | None = None, verify: bool = True):
                 continue
         out.append(det)
     return out
+
+
+def roboflow_to_json(rf_result, pil_img: Image.Image | None = None, verify: bool = True):
+    """Roboflow predictions {predictions:[{x,y,width,height,confidence,class,class_id}]}
+    → our JSON schema with optional geometry + CLIP filter.
+    Roboflow returns CENTER-x/y + width/height, so convert to xyxy.
+    """
+    out = []
+    img_w = pil_img.width if pil_img else rf_result.get("image", {}).get("width", 0)
+    img_h = pil_img.height if pil_img else rf_result.get("image", {}).get("height", 0)
+    for p in rf_result.get("predictions", []):
+        cx, cy = float(p["x"]), float(p["y"])
+        w, h = float(p["width"]), float(p["height"])
+        x1, y1, x2, y2 = cx - w/2, cy - h/2, cx + w/2, cy + h/2
+        xyxy = [round(x, 2) for x in (x1, y1, x2, y2)]
+        if img_w and img_h and not passes_geometry(xyxy, img_w, img_h):
+            continue
+        det = {
+            "class": p.get("class", "shahed"),
+            "class_id": int(p.get("class_id", 0)),
+            "conf": float(p["confidence"]),
+            "xyxy": xyxy,
+        }
+        if verify and pil_img is not None and clip_model is not None:
+            v = clip_verify(pil_img, xyxy)
+            det["clip"] = v
+            if not v["accepted"]:
+                continue
+        out.append(det)
+    return out
+
+
+def run_inference(arr_or_img, conf: float, engine: str | None = None):
+    """Returns (raw_result, json_converter). Caller does:
+        result = run_inference(arr, conf, engine)
+        detections = result['convert'](pil_img, verify)
+    """
+    eng = (engine or DEFAULT_ENGINE).lower()
+    if eng == "roboflow" and ROBOFLOW_API_KEY:
+        client = get_rf_client()
+        if client is not None:
+            try:
+                # Roboflow expects 0-100 confidence
+                rf_conf = int(round(conf * 100))
+                # InferenceHTTPClient accepts numpy arrays directly
+                rf_result = client.infer(
+                    arr_or_img if hasattr(arr_or_img, "shape") else np.array(arr_or_img),
+                    model_id=ROBOFLOW_MODEL_ID,
+                )
+                # Some clients return list for batched calls
+                if isinstance(rf_result, list):
+                    rf_result = rf_result[0]
+                # Apply confidence filter (Roboflow returns at low conf)
+                rf_result["predictions"] = [
+                    p for p in rf_result.get("predictions", [])
+                    if float(p.get("confidence", 0)) >= conf
+                ]
+                return ("roboflow", rf_result)
+            except Exception as e:
+                print(f"roboflow infer error, falling back to local: {e}", flush=True)
+    # local yolo
+    if hasattr(arr_or_img, "shape"):
+        arr = arr_or_img
+    else:
+        arr = np.array(arr_or_img)
+    results = model.predict(arr, conf=conf, verbose=False, device=DEVICE, imgsz=640)
+    return ("local", results[0])
+
+
+def detections_from(raw, pil_img: Image.Image | None, verify: bool):
+    kind, payload = raw
+    if kind == "roboflow":
+        return roboflow_to_json(payload, pil_img=pil_img, verify=verify)
+    return boxes_to_json(payload, pil_img=pil_img, verify=verify)
 
 
 # ---- Palantir helpers ----
@@ -409,6 +506,9 @@ async def health():
         "classes": list(model.names.values()) if hasattr(model, "names") else [],
         "clip": clip_model is not None,
         "palantir": PALANTIR_ENABLED,
+        "engine_default": DEFAULT_ENGINE,
+        "engines_available": ["local"] + (["roboflow"] if ROBOFLOW_API_KEY else []),
+        "roboflow_model_id": ROBOFLOW_MODEL_ID if ROBOFLOW_API_KEY else None,
         "filters": {
             "min_box_frac": MIN_BOX_FRAC,
             "min_aspect": MIN_ASPECT,
@@ -422,15 +522,16 @@ async def detect_image(
     file: UploadFile = File(...),
     conf: float = 0.55,
     verify: bool = True,
+    engine: str | None = None,
 ):
     try:
         contents = await file.read()
         img = Image.open(io.BytesIO(contents)).convert("RGB")
         arr = np.array(img)
         t0 = time.time()
-        results = model.predict(arr, conf=conf, verbose=False, device=DEVICE, imgsz=640)
+        raw = await asyncio.to_thread(run_inference, arr, conf, engine)
         ms = round((time.time() - t0) * 1000, 1)
-        detections = boxes_to_json(results[0], pil_img=img, verify=verify)
+        detections = detections_from(raw, pil_img=img, verify=verify)
         if detections:
             asyncio.create_task(maybe_send_palantir_report(detections, "image-upload", pil_img=img))
         return {
@@ -438,6 +539,7 @@ async def detect_image(
             "width": img.width,
             "height": img.height,
             "inference_ms": ms,
+            "engine": raw[0],
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"image decode/inference failed: {e}")
@@ -449,6 +551,7 @@ async def detect_video(
     conf: float = 0.55,
     sample_every: int = 1,
     verify: bool = True,
+    engine: str | None = None,
 ):
     """Process uploaded video and return mp4 with annotations + per-frame stats."""
     suffix = Path(file.filename or "in.mp4").suffix or ".mp4"
@@ -483,10 +586,11 @@ async def detect_video(
             if not ok:
                 break
             if idx % sample_every == 0:
-                results = model.predict(frame, conf=conf, verbose=False, device=DEVICE, imgsz=640)
-                r = results[0]
                 pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                kept = boxes_to_json(r, pil_img=pil_frame, verify=verify)
+                # Roboflow expects RGB; OpenCV gave us BGR — convert
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) if engine == "roboflow" else frame
+                raw = run_inference(rgb, conf, engine)
+                kept = detections_from(raw, pil_img=pil_frame, verify=verify)
                 annotated = frame.copy()
                 if kept:
                     n_hits += 1
@@ -587,6 +691,7 @@ async def ws_detect(ws: WebSocket):
                 payload = json.loads(msg)
                 conf = float(payload.get("conf", 0.55))
                 verify = bool(payload.get("verify", True))
+                engine = payload.get("engine")  # None → DEFAULT_ENGINE
                 b64 = payload.get("image", "")
                 if "," in b64:
                     b64 = b64.split(",", 1)[1]
@@ -594,10 +699,8 @@ async def ws_detect(ws: WebSocket):
                 img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                 arr = np.array(img)
                 t0 = time.time()
-                results = await asyncio.to_thread(
-                    model.predict, arr, conf=conf, verbose=False, device=DEVICE, imgsz=640
-                )
-                detections = await asyncio.to_thread(boxes_to_json, results[0], img, verify)
+                raw = await asyncio.to_thread(run_inference, arr, conf, engine)
+                detections = await asyncio.to_thread(detections_from, raw, img, verify)
                 ms = round((time.time() - t0) * 1000, 1)
                 if should_send_ws_report(detections):
                     asyncio.create_task(
@@ -613,6 +716,7 @@ async def ws_detect(ws: WebSocket):
                         "height": img.height,
                         "inference_ms": ms,
                         "ts": payload.get("ts"),
+                        "engine": raw[0],
                     })
                 except Exception:
                     return
