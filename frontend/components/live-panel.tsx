@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { WS_BASE, type Detection, type WSMessage } from "@/lib/api";
+import { wsBase, type Detection, type WSMessage } from "@/lib/api";
 import { DetectionList } from "./detection-list";
 import { toast } from "sonner";
 
@@ -95,7 +95,7 @@ export function LivePanel() {
       setRunning(true);
 
       // ws connection
-      const ws = new WebSocket(`${WS_BASE}/ws/detect`);
+      const ws = new WebSocket(`${wsBase()}/ws/detect`);
       wsRef.current = ws;
       ws.onopen = () => setConnected(true);
       ws.onclose = () => setConnected(false);

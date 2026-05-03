@@ -28,10 +28,20 @@ export type WSMessage =
   | { dropped: true }
   | { error: string };
 
+// All backend traffic goes through Next.js rewrites at /api/backend/* so that
+// it works locally and behind Tailscale Funnel without CORS issues.
 export const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+  process.env.NEXT_PUBLIC_API_BASE || "/api/backend";
 
-export const WS_BASE = API_BASE.replace(/^http/, "ws");
+export function wsBase(): string {
+  if (typeof window === "undefined") return "";
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  // For absolute API_BASE (only used in dev), strip protocol
+  if (/^https?:\/\//.test(API_BASE)) {
+    return API_BASE.replace(/^http/, "ws");
+  }
+  return `${proto}//${window.location.host}${API_BASE}`;
+}
 
 export async function detectImage(file: Blob, conf = 0.25): Promise<ImageResult> {
   const fd = new FormData();
