@@ -87,12 +87,20 @@ if USE_CLIP:
         clip_model = None
 
 
+REJECT_LABELS = {"bird", "kite", "balloon", "paper_plane", "cloud", "other"}
+
+
 def clip_verify(pil_img: Image.Image, xyxy) -> dict:
-    """Crop the bbox + run CLIP zero-shot. Returns {label, score, accepted}."""
+    """Crop the bbox + run CLIP zero-shot.
+
+    Strategy: ACCEPT unless CLIP's top label is clearly a non-threat
+    (bird/kite/balloon/paper_plane/cloud/other). Shahed is visually
+    similar to cruise missiles & airplanes — those are kept since they're
+    relevant aerial threats and the YOLO model already predicted shahed.
+    """
     if clip_model is None:
         return {"label": "shahed", "score": 1.0, "accepted": True}
     x1, y1, x2, y2 = [int(round(v)) for v in xyxy]
-    # widen crop slightly for context
     pad_x = max(8, int((x2 - x1) * 0.15))
     pad_y = max(8, int((y2 - y1) * 0.15))
     x1 = max(0, x1 - pad_x); y1 = max(0, y1 - pad_y)
@@ -107,12 +115,13 @@ def clip_verify(pil_img: Image.Image, xyxy) -> dict:
         if not isinstance(feats, torch.Tensor):
             feats = feats.pooler_output if hasattr(feats, "pooler_output") else feats.last_hidden_state.mean(dim=1)
         feats = feats / feats.norm(dim=-1, keepdim=True)
-        sims = (feats @ clip_text_features.T)[0] * 100  # scale for sharper softmax
+        sims = (feats @ clip_text_features.T)[0] * 100
         probs = sims.softmax(dim=-1)
     idx = int(probs.argmax())
     label = CLIP_LABELS[idx][0]
     score = float(probs[idx])
-    return {"label": label, "score": score, "accepted": label == "shahed"}
+    accepted = label not in REJECT_LABELS
+    return {"label": label, "score": round(score, 3), "accepted": accepted}
 
 
 # ---- post-process filters ----
