@@ -104,7 +104,8 @@ async def detect_video(file: UploadFile = File(...), conf: float = 0.25, sample_
     suffix = Path(file.filename or "in.mp4").suffix or ".mp4"
     in_path = OUT_DIR / f"in_{uuid.uuid4().hex}{suffix}"
     out_id = uuid.uuid4().hex
-    out_path = OUT_DIR / f"out_{out_id}.mp4"
+    raw_out_path = OUT_DIR / f"raw_{out_id}.mp4"
+    out_path = OUT_DIR / f"out_{out_id}.mp4"  # H.264 browser-playable (after ffmpeg transcode)
     stats_path = OUT_DIR / f"stats_{out_id}.json"
 
     with open(in_path, "wb") as f:
@@ -117,12 +118,9 @@ async def detect_video(file: UploadFile = File(...), conf: float = 0.25, sample_
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fourcc = cv2.VideoWriter_fourcc(*"avc1")
-    writer = cv2.VideoWriter(str(out_path), fourcc, fps, (width, height))
-    if not writer.isOpened():
-        # fallback to mp4v if avc1 unavailable
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(out_path), fourcc, fps, (width, height))
+    # any codec — we transcode after
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(raw_out_path), fourcc, fps, (width, height))
 
     n_frames = 0
     n_hits = 0
@@ -152,6 +150,26 @@ async def detect_video(file: UploadFile = File(...), conf: float = 0.25, sample_
         cap.release()
         writer.release()
         in_path.unlink(missing_ok=True)
+
+    # transcode to H.264/AAC mp4 with faststart so browsers can stream-play
+    import subprocess
+    transcode = subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-i", str(raw_out_path),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-an",  # no audio
+            str(out_path),
+        ],
+        capture_output=True, text=True,
+    )
+    if transcode.returncode != 0 or not out_path.exists():
+        # fall back to raw if ffmpeg unavailable
+        raw_out_path.rename(out_path)
+    else:
+        raw_out_path.unlink(missing_ok=True)
 
     stats = {
         "out_id": out_id,

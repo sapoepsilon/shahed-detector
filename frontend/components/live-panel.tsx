@@ -19,7 +19,13 @@ export function LivePanel() {
   const [detections, setDetections] = useState<Detection[]>([]);
   const [latency, setLatency] = useState<number | null>(null);
   const [fps, setFps] = useState(0);
+  const [conf, setConf] = useState(0.25);
+  const confRef = useRef(0.25);
   const fpsCount = useRef({ count: 0, t0: performance.now() });
+
+  useEffect(() => {
+    confRef.current = conf;
+  }, [conf]);
 
   const drawOverlay = useCallback((dets: Detection[]) => {
     const canvas = canvasRef.current;
@@ -147,7 +153,7 @@ export function LivePanel() {
         const data = sendCanvas.toDataURL("image/jpeg", 0.7);
         inFlightRef.current = true;
         try {
-          ws.send(JSON.stringify({ image: data, ts: performance.now() }));
+          ws.send(JSON.stringify({ image: data, ts: performance.now(), conf: confRef.current }));
         } catch {
           inFlightRef.current = false;
         }
@@ -218,6 +224,28 @@ export function LivePanel() {
           <div className="flex justify-between">
             <span>TARGETS</span>
             <span className="tabular-nums">{detections.length}</span>
+          </div>
+          <div className="pt-1">
+            <div className="flex justify-between mb-1">
+              <span>CONF MIN</span>
+              <span className="text-[var(--accent)] tabular-nums">
+                {conf.toFixed(2)}
+              </span>
+            </div>
+            <input
+              type="range"
+              min={0.05}
+              max={0.95}
+              step={0.05}
+              value={conf}
+              onChange={(e) => setConf(parseFloat(e.target.value))}
+              className="w-full accent-[var(--accent)]"
+            />
+            <div className="flex justify-between text-[8px] text-[var(--ink-muted)] mt-1">
+              <span>0.05</span>
+              <span>0.50</span>
+              <span>0.95</span>
+            </div>
           </div>
           <button
             onClick={running ? stop : start}

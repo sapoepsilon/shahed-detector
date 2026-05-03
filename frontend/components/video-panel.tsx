@@ -69,11 +69,15 @@ export function VideoPanel() {
       <div className="bracket-frame p-2 bg-[var(--card)]">
         <span className="br1" /><span className="br2" />
         <video
+          key={result.out_id}
           src={`${API_BASE}${result.video_url}`}
           controls
           autoPlay
           loop
-          className="w-full h-auto block"
+          muted
+          playsInline
+          preload="auto"
+          className="w-full h-auto block bg-black"
         />
       </div>
       <aside className="bracket-frame bg-[var(--card)] flex flex-col">
